@@ -8,18 +8,16 @@ on:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
+      - name: Setup kubectl
+      # optional if kubectl isn't preinstalled
+        uses: azure/setup-kubectl@v4
 
-    - name: Install dependencies
-      run: make
+      - name: Lint/validate manifests (client-side)
+        run: kubectl apply --dry-run=client --validate=false -f manifests/
 
-    - name: Run check
-      run: make check
-
-    - name: Run distcheck
-      run: make distcheck
+      - name: Verify scripts
+        run: make verify

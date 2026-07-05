@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: incident-lab
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+      - name: frontend
+        image: hashicorp/http-echo:1.0
+        securityContext:
+          allowPrivilegeEscalation: false
+        args:
+        - "-listen=:8080"
+        - "-text=frontend ok"
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "16Mi"
+            cpu: "50m"
+          limits:
+            memory: "32Mi"
+            cpu: "100m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: incident-lab
+spec:
+  selector:
+    app: frontend
+  ports:
+  - port: 8080

@@ -1,0 +1,193 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: feature-flags
+  namespace: incident-lab
+data:
+  new-checkout-ui: "false"
+  payment-retries: "3"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flag-controller
+  namespace: incident-lab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flag-controller
+  namespace: incident-lab
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flag-controller
+  namespace: incident-lab
+subjects:
+- kind: ServiceAccount
+  name: flag-controller
+  namespace: incident-lab
+roleRef:
+  kind: Role
+  name: flag-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flag-controller-script
+  namespace: incident-lab
+data:
+  reconciler.py: |
+    import json
+    import ssl
+    import time
+    import os
+    import urllib.error
+    import urllib.request
+
+    NAMESPACE = "incident-lab"
+    SOURCE_CM = "feature-flags"
+    STATUS_CM = "flag-controller-status"
+    API = f"https://{os.environ['KUBERNETES_SERVICE_HOST']}:{os.environ['KUBERNETES_SERVICE_PORT']}"
+    TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    REQUEST_TIMEOUT_SECONDS = 2
+    RECONCILE_INTERVAL_SECONDS = 1
+
+    with open(TOKEN_PATH, "r", encoding="utf-8") as token_file:
+        TOKEN = token_file.read().strip()
+
+    SSL_CONTEXT = ssl.create_default_context(cafile=CA_PATH)
+
+    def kube_request(method, path, body=None):
+        data = None
+        headers = {
+            "Authorization": f"Bearer {TOKEN}",
+            "Accept": "application/json",
+        }
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/merge-patch+json" if method == "PATCH" else "application/json"
+
+        request = urllib.request.Request(
+            API + path,
+            data=data,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, context=SSL_CONTEXT, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                raw = response.read()
+                return json.loads(raw.decode("utf-8")) if raw else {}
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+
+    def configmap_path(name):
+        return f"/api/v1/namespaces/{NAMESPACE}/configmaps/{name}"
+
+    def ensure_status_configmap():
+        status = kube_request("GET", configmap_path(STATUS_CM))
+        if status is not None:
+            return
+
+        body = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": STATUS_CM},
+            "data": {"last_reconcile": "never", "observed_generation": "0"},
+        }
+        kube_request("POST", f"/api/v1/namespaces/{NAMESPACE}/configmaps", body)
+
+    def patch_status(generation):
+        patch = {
+            "data": {
+                "last_reconcile": str(time.time()),
+                "observed_generation": str(generation),
+            }
+        }
+        kube_request("PATCH", configmap_path(STATUS_CM), patch)
+
+    def main():
+        while True:
+            try:
+                ensure_status_configmap()
+                break
+            except Exception as e:
+                print(f"waiting for Kubernetes API: {e}", flush=True)
+                time.sleep(RECONCILE_INTERVAL_SECONDS)
+
+        print("flag-controller started, polling ConfigMaps in", NAMESPACE, flush=True)
+
+        last_resource_version = None
+        gen = 0
+        while True:
+            try:
+                cm = kube_request("GET", configmap_path(SOURCE_CM))
+                if cm is None:
+                    time.sleep(RECONCILE_INTERVAL_SECONDS)
+                    continue
+
+                resource_version = cm["metadata"]["resourceVersion"]
+                if resource_version != last_resource_version:
+                    last_resource_version = resource_version
+                    gen += 1
+                    print(f"reconciling {SOURCE_CM}, generation {gen}, data={cm.get('data', {})}", flush=True)
+                    patch_status(gen)
+            except Exception as e:
+                print(f"reconcile retry after Kubernetes API error: {e}", flush=True)
+
+            time.sleep(RECONCILE_INTERVAL_SECONDS)
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flag-controller
+  namespace: incident-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flag-controller
+  template:
+    metadata:
+      labels:
+        app: flag-controller
+    spec:
+      serviceAccountName: flag-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+      - name: flag-controller
+        image: python:3.11-slim
+        securityContext:
+          allowPrivilegeEscalation: false
+        command: ["/bin/sh", "-c"]
+        args:
+        - python /app/reconciler.py
+        volumeMounts:
+        - name: script
+          mountPath: /app
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+      volumes:
+      - name: script
+        configMap:
+          name: flag-controller-script

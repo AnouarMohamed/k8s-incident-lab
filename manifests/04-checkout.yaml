@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  namespace: incident-lab
+  labels:
+    app: checkout
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout
+  template:
+    metadata:
+      labels:
+        app: checkout
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+      containers:
+      - name: checkout
+        image: busybox:1.36
+        securityContext:
+          allowPrivilegeEscalation: false
+        command: ["/bin/sh", "-c"]
+        args:
+        - mkdir -p /tmp/www && echo "checkout ok" > /tmp/www/index.html && exec httpd -f -p 8080 -h /tmp/www
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "16Mi"
+            cpu: "50m"
+          limits:
+            memory: "32Mi"
+            cpu: "100m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout
+  namespace: incident-lab
+spec:
+  selector:
+    app: checkout
+  ports:
+  - port: 8080

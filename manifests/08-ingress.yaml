@@ -1,0 +1,26 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: frontend-headers
+  namespace: incident-lab
+spec:
+  headers:
+    customRequestHeaders:
+      X-Lab-Source: incident-lab
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: frontend
+  namespace: incident-lab
+spec:
+  entryPoints:
+  - web
+  routes:
+  - match: PathPrefix(`/`)
+    kind: Rule
+    services:
+    - name: frontend
+      port: 8080
+    middlewares:
+    - name: frontend-headers

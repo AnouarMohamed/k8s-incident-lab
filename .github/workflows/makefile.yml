@@ -12,12 +12,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup kubectl
-      # optional if kubectl isn't preinstalled
-        uses: azure/setup-kubectl@v4
+      - name: Install YAML parser
+        run: python3 -m pip install --user pyyaml
 
-      - name: Lint/validate manifests (client-side)
-        run: kubectl apply --dry-run=client --validate=false -f manifests/
+      - name: Validate YAML manifests
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+          import yaml
+
+          failures = []
+          for path in sorted(Path("manifests").glob("*.yaml")):
+              try:
+                  docs = [doc for doc in yaml.safe_load_all(path.read_text()) if doc]
+              except yaml.YAMLError as exc:
+                  failures.append(f"{path}: invalid YAML: {exc}")
+                  continue
+
+              if not docs:
+                  failures.append(f"{path}: no Kubernetes documents found")
+                  continue
+
+              for index, doc in enumerate(docs, start=1):
+                  for field in ("apiVersion", "kind", "metadata"):
+                      if field not in doc:
+                          failures.append(f"{path} document {index}: missing {field}")
+                  metadata = doc.get("metadata") or {}
+                  if "name" not in metadata:
+                      failures.append(f"{path} document {index}: missing metadata.name")
+
+          if failures:
+              print("\n".join(failures), file=sys.stderr)
+              sys.exit(1)
+          PY
 
       - name: Verify scripts
-        run: make verify
+        run: |
+          bash -n verify.sh
+          test -x verify.sh
+
+      - name: Check Makefile targets
+        run: make -n status events logs-controller network ingress forward-traefik verify
